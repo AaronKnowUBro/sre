@@ -1,0 +1,347 @@
+# ---------------------------------------------------------------------------
+# Grafana (Requisito 4)
+# ---------------------------------------------------------------------------
+# Todo se aprovisiona por codigo: datasource y dashboard viven en ConfigMaps,
+# de modo que un cluster recien creado ya trae el dashboard listo sin pasos
+# manuales en la interfaz. Esto es la practica de "dashboards as code".
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        # DNS interno del cluster: Grafana consulta a Prometheus por su Service.
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          # Debe coincidir con el scrape_interval de Prometheus para que los
+          # calculos de rate() en los paneles sean correctos.
+          timeInterval: 15s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: sre-dashboards
+        orgId: 1
+        folder: SRE
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  golden-signals.json: |
+    {
+      "uid": "sre-golden-signals",
+      "title": "SRE - Golden Signals",
+      "tags": ["sre", "golden-signals"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "10s",
+      "time": { "from": "now-30m", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Disponibilidad (ultimos 5m)",
+          "description": "Porcentaje de peticiones que no devuelven 5xx. Es el SLI de disponibilidad.",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "100 * (1 - (sum(rate(http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 0.001)))"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "orange", "value": 95 },
+                  { "color": "green", "value": 99 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Trafico (req/s)",
+          "description": "Peticiones por segundo agregadas entre todas las replicas.",
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+          "targets": [
+            { "refId": "A", "expr": "sum(rate(http_requests_total[5m]))" }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "decimals": 2 }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Latencia p95",
+          "description": "Percentil 95 de duracion. Umbral de alerta: 1s.",
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 3,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 0.5 },
+                  { "color": "red", "value": 1 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Replicas activas",
+          "description": "Targets de la aplicacion que responden al scrape.",
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+          "targets": [
+            { "refId": "A", "expr": "count(up{job=\"kubernetes-pods\", app=\"sre-app\"} == 1)" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Trafico por endpoint y codigo de estado",
+          "description": "Desglosa el trafico para ver que endpoint concentra los errores.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(http_requests_total[2m])) by (endpoint, status)",
+              "legendFormat": "{{endpoint}} - {{status}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "lineWidth": 2, "fillOpacity": 10 }
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Tasa de error (%)",
+          "description": "Porcentaje de 5xx sobre el total. La alerta HighErrorRate dispara arriba de 20%.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "100 * (sum(rate(http_requests_total{status=~\"5..\"}[2m])) / clamp_min(sum(rate(http_requests_total[2m])), 0.001))",
+              "legendFormat": "tasa de error"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "max": 100,
+              "min": 0,
+              "custom": { "lineWidth": 2, "fillOpacity": 15 },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 20 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latencia por percentil",
+          "description": "p50, p95 y p99 juntos: muestra cuanto se separa la cola lenta del caso tipico.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p50"
+            },
+            {
+              "refId": "B",
+              "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p95"
+            },
+            {
+              "refId": "C",
+              "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "lineWidth": 2, "fillOpacity": 0 }
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Saturacion: peticiones en curso",
+          "description": "Gauge app_inflight_requests. La alerta HighSaturation dispara arriba de 20.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(app_inflight_requests) by (kubernetes_pod_name)",
+              "legendFormat": "{{kubernetes_pod_name}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": { "lineWidth": 2, "fillOpacity": 20 }
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Consumo de CPU por pod",
+          "description": "Metricas de cAdvisor: confirma si la latencia viene de falta de CPU.",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"sre-app\", container!=\"\"}[5m])) by (pod)",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": { "lineWidth": 2, "fillOpacity": 10 }
+            }
+          }
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.2.0
+          env:
+            # Credenciales de practica. En produccion irian en un Secret y
+            # nunca con valores por defecto.
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+            # Desactiva el aviso de cambio de contrasena en el primer login,
+            # que estorba al tomar los screenshots de evidencia.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+            - name: GF_USERS_DEFAULT_THEME
+              value: dark
+          ports:
+            - name: http
+              containerPort: 3000
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
+      nodePort: 30300

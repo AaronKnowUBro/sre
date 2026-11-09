@@ -1,0 +1,167 @@
+# ---------------------------------------------------------------------------
+# Pipeline de integracion continua (bonus de CI/CD)
+# ---------------------------------------------------------------------------
+# Valida en cada push y Pull Request que el codigo, los manifests, las reglas
+# de alerta y el chart de Helm sean correctos antes de llegar a main.
+# El objetivo es que un error de sintaxis nunca se descubra en el cluster.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Permite ejecutarlo a mano desde la pestana Actions.
+  workflow_dispatch:
+
+jobs:
+  # -------------------------------------------------------------------------
+  lint-python:
+    name: Lint y pruebas de la aplicacion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+          pip install ruff
+
+      - name: Verificar sintaxis
+        run: python -m py_compile app/app.py
+
+      - name: Analisis estatico con ruff
+        run: ruff check app/ --output-format=github
+
+      - name: Comprobar que la app arranca y expone metricas
+        run: |
+          python app/app.py &
+          APP_PID=$!
+          # Espera activa en lugar de un sleep fijo: falla rapido si no arranca.
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:5000/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://localhost:5000/health
+          # Confirma que las metricas clave realmente se exponen.
+          curl -fsS http://localhost:5000/work >/dev/null
+          curl -fsS http://localhost:5000/metrics | grep -q http_requests_total
+          curl -fsS http://localhost:5000/metrics | grep -q http_request_duration_seconds
+          curl -fsS http://localhost:5000/metrics | grep -q app_inflight_requests
+          kill $APP_PID
+          echo "La aplicacion expone las metricas esperadas"
+
+  # -------------------------------------------------------------------------
+  build-image:
+    name: Construir la imagen Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          # push en false: se valida que la imagen compile sin publicarla.
+          push: false
+          tags: sre-final-project-app:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------------------
+  validate-manifests:
+    name: Validar manifests de Kubernetes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar sintaxis YAML
+        run: |
+          python -m pip install pyyaml
+          python - <<'PY'
+          import pathlib, sys, yaml
+          fallos = []
+          for archivo in sorted(pathlib.Path("k8s").glob("*.yaml")):
+              try:
+                  docs = [d for d in yaml.safe_load_all(archivo.read_text()) if d]
+                  print(f"OK  {archivo}  ({len(docs)} documentos)")
+              except yaml.YAMLError as exc:
+                  fallos.append(f"{archivo}: {exc}")
+          if fallos:
+              print("\n".join(fallos), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Validar contra los esquemas de Kubernetes
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          # -summary muestra el conteo final; -strict rechaza campos desconocidos,
+          # que es como se detectan los errores de tipeo en las claves.
+          ./kubeconform -summary -strict -kubernetes-version 1.30.0 k8s/
+
+  # -------------------------------------------------------------------------
+  validate-prometheus:
+    name: Validar reglas de alerta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extraer y validar las reglas con promtool
+        run: |
+          python -m pip install pyyaml
+          # Las reglas viven dentro de un ConfigMap, hay que extraerlas para
+          # que promtool las pueda leer como un archivo de reglas normal.
+          python - <<'PY'
+          import yaml
+          for doc in yaml.safe_load_all(open("k8s/21-prometheus.yaml")):
+              if doc and doc.get("metadata", {}).get("name") == "prometheus-rules":
+                  open("alerts.yml", "w").write(doc["data"]["alerts.yml"])
+                  print("reglas extraidas a alerts.yml")
+              if doc and doc.get("metadata", {}).get("name") == "prometheus-config":
+                  open("prometheus.yml", "w").write(doc["data"]["prometheus.yml"])
+                  print("configuracion extraida a prometheus.yml")
+          PY
+
+          docker run --rm -v "$PWD:/work" -w /work \
+            --entrypoint promtool prom/prometheus:v2.54.1 \
+            check rules alerts.yml
+
+  # -------------------------------------------------------------------------
+  validate-helm:
+    name: Validar el chart de Helm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: helm lint
+        run: helm lint helm/sre-app
+
+      - name: Renderizar las plantillas
+        run: helm template sre-app helm/sre-app > /tmp/rendered.yaml
+
+      - name: Validar el resultado renderizado
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -summary -strict -kubernetes-version 1.30.0 /tmp/rendered.yaml

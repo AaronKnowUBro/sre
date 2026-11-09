@@ -1,0 +1,17 @@
+La aplicacion {{ include "sre-app.fullname" . }} quedo desplegada con {{ .Values.replicaCount }} replicas.
+
+Para abrirla:
+{{- if eq .Values.service.type "NodePort" }}
+  export NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "http://$NODE_IP:{{ .Values.service.nodePort }}"
+{{- else }}
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "sre-app.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+{{ if .Values.metrics.enabled -}}
+Las metricas se exponen en {{ .Values.metrics.path }} y Prometheus las descubre
+por las anotaciones del pod. Verifica el target en Prometheus > Status > Targets.
+{{- else -}}
+ATENCION: metrics.enabled esta en false, por lo que Prometheus NO recolectara
+esta aplicacion. Activalo con --set metrics.enabled=true
+{{- end }}

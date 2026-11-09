@@ -1,0 +1,6 @@
+# Framework web minimo para exponer los endpoints HTTP.
+Flask==3.0.3
+# Cliente oficial de Prometheus: crea las metricas y renderiza /metrics.
+prometheus_client==0.21.0
+# Servidor WSGI de produccion: Flask por si solo no debe exponerse directo.
+gunicorn==23.0.0

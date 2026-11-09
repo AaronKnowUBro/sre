@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Secretos: nunca se versionan credenciales de Slack ni SMTP
+secrets/
+*.secret.yaml
+.env
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores
+.idea/
+.vscode/
+*.swp
+
+# Helm
+*.tgz
+charts/*.tgz
+
+# Reporte generado por verify.sh
+docs/verificacion.txt

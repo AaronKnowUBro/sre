@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# Valores por defecto del chart.
+# Se sobrescriben con --set o con un archivo propio:
+#   helm upgrade --install sre-app helm/sre-app -f mis-valores.yaml
+# ---------------------------------------------------------------------------
+
+replicaCount: 2
+
+image:
+  repository: sre-final-project-app
+  tag: latest
+  # Never: usa la imagen del daemon Docker de Minikube sin buscarla en un
+  # registro remoto. En un cluster real seria IfNotPresent.
+  pullPolicy: Never
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: NodePort
+  port: 5000
+  nodePort: 30500
+
+# Configuracion del comportamiento de la aplicacion. Cambiarla permite
+# demostrar distintos escenarios de alerta sin reconstruir la imagen.
+app:
+  # Proporcion de peticiones a /work que devuelven error (0.0 a 1.0).
+  errorRate: "0.1"
+  minLatency: "0.05"
+  maxLatency: "0.4"
+
+# Las anotaciones habilitan el service discovery de Prometheus.
+# Sin ellas el pod existe pero nunca se recolecta.
+metrics:
+  enabled: true
+  port: 5000
+  path: /metrics
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+# /health no tiene latencia artificial, por eso es seguro en las probes.
+probes:
+  path: /health
+  livenessInitialDelay: 10
+  readinessInitialDelay: 5
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

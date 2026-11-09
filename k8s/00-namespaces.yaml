@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# Namespaces del proyecto
+# ---------------------------------------------------------------------------
+# Se separa la aplicacion del stack de observabilidad para reflejar como se
+# organiza en produccion: el equipo de plataforma administra "monitoring" y
+# el equipo de producto administra "sre-app".
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-app
+  labels:
+    name: sre-app
+    tier: application
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+    tier: observability

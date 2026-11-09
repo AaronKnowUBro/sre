@@ -1,0 +1,323 @@
+# ---------------------------------------------------------------------------
+# Alertmanager (Requisito 5 + bonus de notificaciones externas)
+# ---------------------------------------------------------------------------
+# Prometheus solo evalua y dispara; Alertmanager es quien agrupa, silencia,
+# deduplica y enruta las notificaciones hacia los destinos finales.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+  labels:
+    app: alertmanager
+data:
+  alertmanager.yml: |
+    global:
+      # Si una alerta deja de llegar, se marca como resuelta tras 5 minutos.
+      resolve_timeout: 5m
+
+    # Plantillas reutilizables para dar formato legible a las notificaciones.
+    templates:
+      - /etc/alertmanager/templates/*.tmpl
+
+    route:
+      # Agrupa por nombre de alerta y servicio: si cinco pods fallan a la vez
+      # llega una sola notificacion en lugar de cinco.
+      group_by: ['alertname', 'service']
+      # Espera 30s antes de enviar el primer aviso de un grupo nuevo, por si
+      # llegan alertas relacionadas que se puedan incluir en el mismo mensaje.
+      group_wait: 30s
+      # Intervalo minimo para avisar de alertas nuevas dentro de un grupo ya enviado.
+      group_interval: 5m
+      # Cada 4 horas se repite el aviso si la alerta sigue activa.
+      repeat_interval: 4h
+      receiver: default-webhook
+
+      # Rutas especificas: las criticas se notifican mas seguido que el resto.
+      routes:
+        - matchers:
+            - severity = critical
+          receiver: critical-receiver
+          group_wait: 10s
+          repeat_interval: 1h
+        - matchers:
+            - severity = info
+          receiver: default-webhook
+          repeat_interval: 12h
+
+    # Inhibicion: si la aplicacion esta caida por completo, no tiene sentido
+    # recibir tambien la alerta de latencia alta del mismo servicio.
+    inhibit_rules:
+      - source_matchers:
+          - alertname = AppMetricsMissing
+        target_matchers:
+          - severity =~ "warning|info"
+        equal: ['service']
+
+    receivers:
+      # Receptor que funciona sin ningun secreto: el webhook interno del
+      # cluster registra cada alerta en sus logs. Sirve como evidencia
+      # reproducible sin depender de servicios externos.
+      - name: default-webhook
+        webhook_configs:
+          - url: 'http://alert-logger.monitoring.svc.cluster.local:8080/'
+            send_resolved: true
+
+      - name: critical-receiver
+        webhook_configs:
+          - url: 'http://alert-logger.monitoring.svc.cluster.local:8080/'
+            send_resolved: true
+
+        # ---------------------------------------------------------------
+        # BONUS: notificaciones externas.
+        # Descomenta el bloque que quieras usar y coloca tus datos.
+        # Para no versionar secretos, usa el Secret de abajo y monta los
+        # valores con la directiva *_file que soporta Alertmanager.
+        # ---------------------------------------------------------------
+        # slack_configs:
+        #   - api_url_file: /etc/alertmanager/secrets/slack-webhook-url
+        #     channel: '#sre-alerts'
+        #     send_resolved: true
+        #     title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+        #     text: >-
+        #       {{ range .Alerts }}*{{ .Annotations.summary }}*
+        #       {{ .Annotations.description }}
+        #       Severidad: {{ .Labels.severity }}
+        #       {{ end }}
+
+        # email_configs:
+        #   - to: 'tu-correo@gmail.com'
+        #     from: 'tu-correo@gmail.com'
+        #     smarthost: 'smtp.gmail.com:587'
+        #     auth_username: 'tu-correo@gmail.com'
+        #     auth_password_file: /etc/alertmanager/secrets/smtp-password
+        #     send_resolved: true
+        #     headers:
+        #       Subject: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-templates
+  namespace: monitoring
+  labels:
+    app: alertmanager
+data:
+  default.tmpl: |
+    {{ define "sre.summary" }}
+    {{ range .Alerts }}
+    Alerta:     {{ .Labels.alertname }}
+    Severidad:  {{ .Labels.severity }}
+    Servicio:   {{ .Labels.service }}
+    Resumen:    {{ .Annotations.summary }}
+    Detalle:    {{ .Annotations.description }}
+    Runbook:    {{ .Annotations.runbook }}
+    {{ end }}
+    {{ end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+      # Alertmanager tambien expone sus propias metricas: se recolecta a si
+      # mismo para poder alertar si el sistema de alertas falla.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9093"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+            - --web.external-url=http://localhost:30903
+          ports:
+            - name: http
+              containerPort: 9093
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager/alertmanager.yml
+              subPath: alertmanager.yml
+            - name: templates
+              mountPath: /etc/alertmanager/templates
+            - name: storage
+              mountPath: /alertmanager
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        - name: templates
+          configMap:
+            name: alertmanager-templates
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  type: NodePort
+  selector:
+    app: alertmanager
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9093
+      targetPort: 9093
+      nodePort: 30903
+---
+# ---------------------------------------------------------------------------
+# Receptor de webhooks: deja constancia de cada alerta en sus logs.
+# Permite demostrar el flujo completo Prometheus -> Alertmanager -> destino
+# sin configurar credenciales de Slack ni SMTP.
+# Se revisa con: kubectl logs -n monitoring deploy/alert-logger -f
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-logger-script
+  namespace: monitoring
+  labels:
+    app: alert-logger
+data:
+  server.py: |
+    """Servidor HTTP minimo que imprime en consola las alertas recibidas."""
+    import json
+    from datetime import datetime
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+    class AlertHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {"raw": raw.decode("utf-8", "replace")}
+
+            stamp = datetime.utcnow().isoformat()
+            print(f"\n{'=' * 70}", flush=True)
+            print(f"ALERTA RECIBIDA  {stamp}Z", flush=True)
+            print(f"estado: {payload.get('status', 'desconocido')}", flush=True)
+
+            for alert in payload.get("alerts", []):
+                labels = alert.get("labels", {})
+                annotations = alert.get("annotations", {})
+                print(f"  - {labels.get('alertname')} "
+                      f"[{labels.get('severity')}]", flush=True)
+                print(f"    {annotations.get('summary', '')}", flush=True)
+                print(f"    {annotations.get('description', '')}", flush=True)
+
+            print(f"{'=' * 70}\n", flush=True)
+
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def do_GET(self):
+            # Sirve como health check para la probe de Kubernetes.
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"alert-logger activo")
+
+        def log_message(self, fmt, *args):
+            # Silencia el log por peticion para que solo se vean las alertas.
+            return
+
+
+    if __name__ == "__main__":
+        print("alert-logger escuchando en el puerto 8080", flush=True)
+        HTTPServer(("0.0.0.0", 8080), AlertHandler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-logger
+  namespace: monitoring
+  labels:
+    app: alert-logger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-logger
+  template:
+    metadata:
+      labels:
+        app: alert-logger
+    spec:
+      containers:
+        - name: alert-logger
+          image: python:3.12-slim
+          command: ["python", "/app/server.py"]
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: script
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+      volumes:
+        - name: script
+          configMap:
+            name: alert-logger-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-logger
+  namespace: monitoring
+  labels:
+    app: alert-logger
+spec:
+  selector:
+    app: alert-logger
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080

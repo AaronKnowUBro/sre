@@ -1,0 +1,279 @@
+# ---------------------------------------------------------------------------
+# Prometheus: configuracion, reglas de alerta, deployment y servicio
+# (Requisito 3)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+  labels:
+    app: prometheus
+data:
+  prometheus.yml: |
+    global:
+      # Cada 15s se recolectan las metricas. Un intervalo mas corto da mas
+      # resolucion pero consume mas almacenamiento y CPU.
+      scrape_interval: 15s
+      # Cada 15s se reevaluan las reglas de alerta.
+      evaluation_interval: 15s
+      external_labels:
+        cluster: minikube
+        project: sre-final-project
+
+    # Prometheus evalua las reglas y envia las alertas que disparan hacia
+    # Alertmanager, que es quien decide a donde notificarlas.
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.monitoring.svc.cluster.local:9093']
+
+    # Las reglas viven en un ConfigMap aparte montado en este directorio.
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      # 1) Prometheus se monitorea a si mismo: primera senal de que el stack vive.
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # 2) Descubrimiento dinamico de pods por anotaciones.
+      #    Es el job que recolecta nuestra aplicacion: no hay IPs fijas, los
+      #    pods se descubren solos aunque cambien de IP al reiniciarse.
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Solo los pods con prometheus.io/scrape=true entran.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          # Se arma la direccion con la IP del pod y el puerto de la anotacion.
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+);(.+)
+            replacement: ${1}:${2}
+            target_label: __address__
+          # Ruta personalizada si el pod declara prometheus.io/path.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # Etiquetas utiles para filtrar en Grafana y en las alertas.
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: kubernetes_pod_name
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+
+      # 3) Metricas de contenedores desde cAdvisor (CPU, memoria, red).
+      #    Alimentan los paneles de saturacion del dashboard.
+      - job_name: kubernetes-cadvisor
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__address__]
+            action: replace
+            regex: (.+):(?:\d+)
+            replacement: ${1}:10250
+            target_label: __address__
+          - target_label: __metrics_path__
+            replacement: /metrics/cadvisor
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: kubernetes_node
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+  labels:
+    app: prometheus
+data:
+  alerts.yml: |
+    groups:
+      # ---------------------------------------------------------------
+      # Alertas basadas en los Golden Signals de la aplicacion
+      # ---------------------------------------------------------------
+      - name: sre-app-golden-signals
+        rules:
+          # ERRORES: porcentaje de respuestas 5xx sobre el total.
+          # rate() sobre 2 minutos reacciona rapido sin ser ruidoso.
+          # El 'for: 1m' evita alertar por un pico aislado de un solo scrape.
+          - alert: HighErrorRate
+            expr: |
+              100 * (
+                sum(rate(http_requests_total{status=~"5.."}[2m]))
+                /
+                clamp_min(sum(rate(http_requests_total[2m])), 0.001)
+              ) > 20
+            for: 1m
+            labels:
+              severity: critical
+              service: sre-app
+            annotations:
+              summary: "Tasa de error alta en sre-app"
+              description: "Mas del 20% de las peticiones devuelven 5xx durante el ultimo minuto. Valor actual {{ $value | printf \"%.1f\" }}%."
+              runbook: "docs/runbook.md#highErrorRate"
+
+          # LATENCIA: percentil 95 calculado desde los buckets del histograma.
+          # Se usa p95 y no el promedio porque el promedio esconde la cola
+          # lenta, que es justo la que afecta la experiencia del usuario.
+          - alert: HighLatencyP95
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+              ) > 1
+            for: 2m
+            labels:
+              severity: warning
+              service: sre-app
+            annotations:
+              summary: "Latencia p95 por encima de 1 segundo"
+              description: "El percentil 95 de latencia es {{ $value | printf \"%.2f\" }}s, por encima del objetivo de 1s."
+              runbook: "docs/runbook.md#highLatencyP95"
+
+          # SATURACION: peticiones concurrentes acumuladas.
+          - alert: HighSaturation
+            expr: sum(app_inflight_requests) > 20
+            for: 2m
+            labels:
+              severity: warning
+              service: sre-app
+            annotations:
+              summary: "Saturacion alta en sre-app"
+              description: "Hay {{ $value }} peticiones en curso simultaneas."
+              runbook: "docs/runbook.md#highSaturation"
+
+          # TRAFICO: ausencia total de peticiones. Un dashboard en cero puede
+          # significar que nadie usa el servicio o que esta roto aguas arriba.
+          - alert: NoTraffic
+            expr: sum(rate(http_requests_total[5m])) == 0
+            for: 5m
+            labels:
+              severity: info
+              service: sre-app
+            annotations:
+              summary: "Sin trafico en sre-app"
+              description: "La aplicacion no ha recibido peticiones en los ultimos 5 minutos."
+              runbook: "docs/runbook.md#noTraffic"
+
+      # ---------------------------------------------------------------
+      # Alertas de disponibilidad de la plataforma
+      # ---------------------------------------------------------------
+      - name: sre-app-availability
+        rules:
+          # 'up' lo genera Prometheus por cada target: 1 si responde, 0 si no.
+          - alert: AppInstanceDown
+            expr: up{job="kubernetes-pods", app="sre-app"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              service: sre-app
+            annotations:
+              summary: "Instancia de sre-app sin responder"
+              description: "El pod {{ $labels.kubernetes_pod_name }} no responde al scrape de Prometheus."
+              runbook: "docs/runbook.md#appInstanceDown"
+
+          # absent() dispara cuando la metrica desaparece por completo, caso
+          # que 'up == 0' no cubre si el target deja de existir en el discovery.
+          - alert: AppMetricsMissing
+            expr: absent(app_up)
+            for: 2m
+            labels:
+              severity: critical
+              service: sre-app
+            annotations:
+              summary: "No llegan metricas de sre-app"
+              description: "La metrica app_up no existe: ningun pod esta siendo recolectado."
+              runbook: "docs/runbook.md#appMetricsMissing"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      # Vincula el ServiceAccount con los permisos RBAC del archivo anterior.
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # Retencion corta: suficiente para la demo y evita llenar el disco.
+            - --storage.tsdb.retention.time=6h
+            # Permite recargar la configuracion con POST /-/reload sin reiniciar.
+            - --web.enable-lifecycle
+          ports:
+            - name: http
+              containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: rules
+              mountPath: /etc/prometheus/rules
+            - name: storage
+              mountPath: /prometheus
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-rules
+        # emptyDir: los datos se pierden al reiniciar el pod. Es aceptable en
+        # un entorno de practica; en produccion seria un PersistentVolumeClaim.
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  type: NodePort
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9090
+      targetPort: 9090
+      nodePort: 30909

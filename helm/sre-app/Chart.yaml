@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sre-app
+description: Chart de Helm para la aplicacion instrumentada del proyecto final de SRE
+type: application
+# version: version del chart, se sube con cada cambio al chart mismo.
+version: 0.1.0
+# appVersion: version de la aplicacion que empaqueta el chart.
+appVersion: "1.0.0"
+keywords:
+  - sre
+  - observability
+  - prometheus
+maintainers:
+  - name: Aaron Calderon
