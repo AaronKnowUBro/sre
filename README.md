@@ -117,6 +117,7 @@ El detalle del flujo de datos y las decisiones de diseno estan en
 │
 ├── scripts/
 │   ├── cluster.sh                Despliegue completo con un comando
+│   ├── setup-wsl.sh              Instalador de herramientas para WSL2 en Windows
 │   ├── verify.sh                 Verificacion de extremo a extremo del stack
 │   ├── load-test.sh              Generador de trafico y de escenarios de falla
 │   └── capture.ps1               Ayudante de screenshots para Windows
@@ -144,6 +145,34 @@ El detalle del flujo de datos y las decisiones de diseno estan en
 | Helm        | 3.15 (opcional) | `helm version` |
 
 Recursos recomendados para el cluster: **2 CPU y 4 GB de RAM**.
+
+### Instalacion en Windows
+
+Docker Desktop requiere licencia comercial en organizaciones grandes, por lo
+que la ruta recomendada en Windows es **WSL2 con Docker Engine**, que es
+software libre y no tiene esa restriccion.
+
+Dentro de Ubuntu en WSL2:
+
+```bash
+bash scripts/setup-wsl.sh
+```
+
+El script comprueba la salida a internet hacia los cuatro destinos que
+necesita, instala Docker Engine (con el repositorio oficial y, si el proxy lo
+bloquea, el paquete de Ubuntu como alternativa), kubectl, Minikube y Helm,
+configura el acceso a Docker sin `sudo` y deja el daemon arrancando
+automaticamente en las distribuciones sin systemd.
+
+Al terminar, abre una terminal nueva para que el grupo `docker` tome efecto y
+continua con el despliegue.
+
+> Desde WSL2, usa `bash scripts/cluster.sh` en lugar de `./scripts/cluster.sh`:
+> los archivos viven en el sistema de archivos de Windows (`/mnt/c`), que no
+> conserva el bit de ejecucion.
+
+Los puertos expuestos con `port-forward` desde WSL2 son accesibles en el
+navegador de Windows como `localhost`, sin configuracion extra.
 
 ---
 
