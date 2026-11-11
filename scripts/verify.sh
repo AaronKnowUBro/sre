@@ -5,12 +5,20 @@
 # Levanta sus propios port-forward temporales, consulta las APIs de
 # Prometheus, Alertmanager y Grafana, y emite un reporte completo.
 #
+# El formateo de las respuestas JSON vive en scripts/_report.py, no incrustado
+# aqui: el codigo Python dentro de comillas de shell obliga a escapar las
+# comillas internas, y un backslash dentro de una expresion de f-string es un
+# error de sintaxis de Python.
+#
 # Uso:
-#   ./scripts/verify.sh              reporte en pantalla
-#   ./scripts/verify.sh > reporte.txt   guardarlo en un archivo
+#   bash scripts/verify.sh                      reporte en pantalla
+#   bash scripts/verify.sh > docs/verificacion.txt
 # ---------------------------------------------------------------------------
 
-set -uo pipefail   # sin -e: queremos que el reporte termine aunque algo falle
+set -uo pipefail   # sin -e: queremos el reporte completo aunque algo falle
+
+DIR_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPORTE="$DIR_SCRIPT/_report.py"
 
 PASADAS=0
 FALLIDAS=0
@@ -23,7 +31,6 @@ trap limpiar EXIT
 
 titulo() { printf '\n========== %s ==========\n' "$1"; }
 
-# comprueba <descripcion> <comando...>
 comprueba() {
   local desc="$1"; shift
   if "$@" >/dev/null 2>&1; then
@@ -33,11 +40,14 @@ comprueba() {
   fi
 }
 
-# Extrae valores de JSON sin depender de jq, que no siempre esta instalado.
-json() {
-  if command -v python3 >/dev/null 2>&1; then python3 -c "$1"
-  elif command -v python >/dev/null 2>&1; then python -c "$1"
-  else cat; fi
+# Formatea una respuesta JSON con el ayudante de Python.
+formatea() {
+  if [ -n "${PY:-}" ] && [ -f "$REPORTE" ]; then
+    "$PY" "$REPORTE" "$1"
+  else
+    echo "  (sin python3: no se puede formatear la respuesta)"
+    cat >/dev/null
+  fi
 }
 
 echo "==============================================================="
@@ -51,8 +61,19 @@ comprueba "docker disponible"   command -v docker
 comprueba "minikube disponible" command -v minikube
 comprueba "kubectl disponible"  command -v kubectl
 comprueba "cluster accesible"   kubectl cluster-info
+
+PY=""
+for cand in python3 python; do
+  command -v "$cand" >/dev/null 2>&1 && { PY="$cand"; break; }
+done
+if [ -n "$PY" ]; then
+  printf '  [OK]    %s disponible para formatear el reporte\n' "$PY"
+else
+  printf '  [AVISO] sin python3: las secciones de API saldran sin formato\n'
+fi
+
 echo
-kubectl version --short 2>/dev/null || kubectl version --client 2>/dev/null | head -2
+kubectl version --client 2>/dev/null | head -2
 minikube status 2>&1 | head -6
 
 # ---------------------------------------------------------------------------
@@ -61,6 +82,7 @@ kubectl get pods -n sre-app -o wide 2>&1
 echo
 kubectl get pods -n monitoring -o wide 2>&1
 echo
+
 for ns_dep in "sre-app/sre-app" "monitoring/prometheus" "monitoring/alertmanager" \
               "monitoring/alert-logger" "monitoring/grafana"; do
   ns="${ns_dep%%/*}"; dep="${ns_dep##*/}"
@@ -72,11 +94,39 @@ for ns_dep in "sre-app/sre-app" "monitoring/prometheus" "monitoring/alertmanager
   fi
 done
 
-# Los reinicios repetidos delatan CrashLoopBackOff u OOMKilled.
+# Los ejercicios del curso despliegan en el mismo namespace 'monitoring' con
+# nombres terminados en '-deployment'. Si quedaron de una sesion anterior,
+# compiten por los NodePorts y confunden la evidencia.
+VIEJOS=$(kubectl get deploy -n monitoring -o name 2>/dev/null | grep -- '-deployment$' || true)
+if [ -n "$VIEJOS" ]; then
+  echo
+  echo "  [AVISO] hay despliegues de los ejercicios del curso en 'monitoring':"
+  echo "$VIEJOS" | sed 's/^/            /'
+  echo "          Pueden chocar en los NodePorts con este proyecto."
+  echo "          Para quitarlos:"
+  echo "            kubectl delete deploy,svc,cm -n monitoring --all"
+  echo "            bash scripts/cluster.sh"
+fi
+
 echo
 echo "Reinicios por pod (un valor alto indica un problema):"
 kubectl get pods -A -o custom-columns='NS:.metadata.namespace,POD:.metadata.name,REINICIOS:.status.containerStatuses[0].restartCount' 2>/dev/null \
   | grep -E 'sre-app|monitoring|NS' || true
+
+# Si no hay nada desplegado, el resto del reporte seria ruido.
+if ! kubectl get deploy sre-app -n sre-app >/dev/null 2>&1; then
+  titulo "RESUMEN"
+  echo "  El despliegue no existe todavia: no hay Deployment 'sre-app' en el"
+  echo "  namespace 'sre-app'."
+  echo
+  echo "  Ejecuta primero el despliegue y vuelve a correr esta verificacion:"
+  echo
+  echo "    bash scripts/cluster.sh"
+  echo "    bash scripts/verify.sh"
+  echo
+  echo "==============================================================="
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 titulo "3. PORT-FORWARD TEMPORALES"
@@ -107,102 +157,44 @@ titulo "5. PROMETHEUS"
 comprueba "API responde" curl -fsS --max-time 10 http://localhost:9090/-/ready
 echo
 echo "Targets activos:"
-curl -fsS --max-time 15 http://localhost:9090/api/v1/targets 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-activos=d["data"]["activeTargets"]
-arriba=[t for t in activos if t["health"]=="up"]
-for t in sorted(activos, key=lambda x: x["labels"].get("job","")):
-    l=t["labels"]
-    marca="[OK]   " if t["health"]=="up" else "[FALLA]"
-    print(f"  {marca} job={l.get(\"job\"):22} instance={l.get(\"instance\",\"?\"):24} salud={t[\"health\"]}")
-    if t["health"]!="up" and t.get("lastError"):
-        print(f"          error: {t[\"lastError\"]}")
-print(f"\n  TOTAL: {len(arriba)}/{len(activos)} targets en UP")
-app=[t for t in arriba if t["labels"].get("app")=="sre-app"]
-print(f"  Pods de la aplicacion recolectados: {len(app)} (se esperan 2)")
-' 2>&1
-
+curl -fsS --max-time 15 http://localhost:9090/api/v1/targets 2>/dev/null | formatea targets
 echo
 echo "Reglas de alerta cargadas:"
-curl -fsS --max-time 15 http://localhost:9090/api/v1/rules 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-n=0
-for g in d["data"]["groups"]:
-    print(f"  grupo: {g[\"name\"]}")
-    for r in g["rules"]:
-        n+=1
-        print(f"    - {r[\"name\"]:20} estado={r.get(\"state\",\"?\")}")
-print(f"\n  TOTAL: {n} reglas cargadas (se esperan 6)")
-' 2>&1
-
+curl -fsS --max-time 15 http://localhost:9090/api/v1/rules 2>/dev/null | formatea rules
 echo
 echo "Consulta de prueba (tasa de peticiones):"
 curl -fsS --max-time 15 -G http://localhost:9090/api/v1/query \
-  --data-urlencode 'query=sum(rate(http_requests_total[5m]))' 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-r=d["data"]["result"]
-if r: print(f"  [OK]    hay datos: {float(r[0][\"value\"][1]):.4f} req/s")
-else: print("  [AVISO] sin datos todavia: genera trafico con ./scripts/load-test.sh")
-' 2>&1
+  --data-urlencode 'query=sum(rate(http_requests_total[5m]))' 2>/dev/null | formatea query
 
 # ---------------------------------------------------------------------------
 titulo "6. ALERTMANAGER"
 comprueba "API responde" curl -fsS --max-time 10 http://localhost:9093/-/ready
 echo
 echo "Prometheus ve a Alertmanager:"
-curl -fsS --max-time 15 http://localhost:9090/api/v1/alertmanagers 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-a=d["data"]["activeAlertmanagers"]
-if a:
-    for x in a: print(f"  [OK]    {x[\"url\"]}")
-else:
-    print("  [FALLA] Prometheus no tiene Alertmanager activo")
-' 2>&1
-
+curl -fsS --max-time 15 http://localhost:9090/api/v1/alertmanagers 2>/dev/null | formatea alertmanagers
 echo
 echo "Alertas actualmente en Alertmanager:"
-curl -fsS --max-time 15 http://localhost:9093/api/v2/alerts 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-if not d: print("  (ninguna: normal si no has disparado alertas todavia)")
-for a in d:
-    l=a.get("labels",{})
-    print(f"  - {l.get(\"alertname\")} [{l.get(\"severity\")}] estado={a[\"status\"][\"state\"]}")
-' 2>&1
+curl -fsS --max-time 15 http://localhost:9093/api/v2/alerts 2>/dev/null | formatea alerts
 
 # ---------------------------------------------------------------------------
 titulo "7. GRAFANA"
 comprueba "API de salud responde" curl -fsS --max-time 10 http://localhost:3000/api/health
 echo
 echo "Datasource aprovisionado:"
-curl -fsS --max-time 15 -u admin:admin http://localhost:3000/api/datasources 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-if not d: print("  [FALLA] no hay datasources")
-for x in d: print(f"  [OK]    {x[\"name\"]} ({x[\"type\"]}) -> {x[\"url\"]}  default={x[\"isDefault\"]}")
-' 2>&1
-
+curl -fsS --max-time 15 -u admin:admin http://localhost:3000/api/datasources 2>/dev/null | formatea datasources
 echo
 echo "Prueba de conexion del datasource a Prometheus:"
-curl -fsS --max-time 20 -u admin:admin \
-  -H 'Content-Type: application/json' \
-  "http://localhost:3000/api/ds/query" \
-  -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus"},"expr":"up","instant":true}],"from":"now-5m","to":"now"}' \
-  >/dev/null 2>&1 && echo "  [OK]    Grafana consulta a Prometheus correctamente" \
-                   || echo "  [AVISO] la consulta de prueba no respondio como se esperaba"
-
+if curl -fsS --max-time 20 -u admin:admin -H 'Content-Type: application/json' \
+     "http://localhost:3000/api/ds/query" \
+     -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus"},"expr":"up","instant":true}],"from":"now-5m","to":"now"}' \
+     >/dev/null 2>&1; then
+  echo "  [OK]    Grafana consulta a Prometheus correctamente"; PASADAS=$((PASADAS + 1))
+else
+  echo "  [AVISO] la consulta de prueba no respondio como se esperaba"
+fi
 echo
 echo "Dashboard aprovisionado:"
-curl -fsS --max-time 15 -u admin:admin 'http://localhost:3000/api/search?query=Golden' 2>/dev/null | json '
-import json,sys
-d=json.load(sys.stdin)
-if not d: print("  [FALLA] el dashboard no aparece")
-for x in d: print(f"  [OK]    {x[\"title\"]}  carpeta={x.get(\"folderTitle\",\"General\")}  url={x[\"url\"]}")
-' 2>&1
+curl -fsS --max-time 15 -u admin:admin 'http://localhost:3000/api/search?query=Golden' 2>/dev/null | formatea dashboards
 
 # ---------------------------------------------------------------------------
 titulo "8. RECEPTOR DE ALERTAS"
