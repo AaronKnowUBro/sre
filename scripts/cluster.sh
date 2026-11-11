@@ -73,58 +73,85 @@ minikube addons enable metrics-server >/dev/null 2>&1 \
   || warn "no se pudo habilitar metrics-server (opcional)"
 
 # ---------------------------------------------------------------------------
-# 3. Imagen de la aplicacion
+# 3. Runtime del cluster y conectividad
 # ---------------------------------------------------------------------------
-# Apuntar el cliente Docker al daemon interno de Minikube deja la imagen
-# disponible para el cluster sin registro ni 'docker push'.
-log "Construyendo la imagen $IMAGEN dentro de Minikube"
-eval "$(minikube docker-env)" || { err "no se pudo apuntar al daemon de Minikube"; exit 1; }
-if ! docker build -t "$IMAGEN" "$DIR_RAIZ/app"; then
-  err "La construccion de la imagen fallo."
-  err "Si el error es de red al instalar las dependencias de Python, el proxy"
-  err "esta bloqueando pypi.org."
+# Minikube puede usar containerd, CRI-O o Docker como runtime. El atajo
+# 'minikube docker-env' solo sirve con el runtime Docker: con containerd apunta
+# el cliente a un endpoint que no implementa la API que buildx necesita y la
+# construccion falla al arrancar buildkit.
+# Por eso la imagen se construye con el Docker del host y se carga al cluster
+# con 'minikube image load', que funciona con cualquier runtime.
+RUNTIME=$(minikube profile list -o json 2>/dev/null \
+  | grep -o '"ContainerRuntime":"[^"]*"' | head -1 | cut -d'"' -f4)
+log "Runtime del cluster: ${RUNTIME:-desconocido}"
+if [ "$RUNTIME" != "docker" ] && [ -n "$RUNTIME" ]; then
+  ok "se usara 'minikube image load' (compatible con $RUNTIME)"
+fi
+
+log "Comprobando acceso al registro de imagenes"
+if docker pull -q hello-world >/dev/null 2>&1; then
+  ok "Docker Hub accesible"
+else
+  err "No se puede descargar de Docker Hub. El proxy lo esta bloqueando."
+  err "Sin acceso al registro el stack no puede arrancar."
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Imagen de la aplicacion
+# ---------------------------------------------------------------------------
+log "Construyendo la imagen $IMAGEN con el Docker del host"
+if ! docker build -t "$IMAGEN" "$DIR_RAIZ/app"; then
+  warn "el constructor por defecto fallo, reintentando con el clasico"
+  if ! DOCKER_BUILDKIT=0 docker build -t "$IMAGEN" "$DIR_RAIZ/app"; then
+    err "La construccion de la imagen fallo."
+    err "Si el error es de red al instalar las dependencias de Python, el proxy"
+    err "esta bloqueando pypi.org."
+    exit 1
+  fi
 fi
 ok "imagen construida"
 
+log "Cargando la imagen en el cluster"
+# Transfiere la imagen al runtime del nodo. Tarda un poco porque mueve el
+# tarball completo, pero es independiente del runtime que use Minikube.
+if ! minikube image load "$IMAGEN"; then
+  err "No se pudo cargar la imagen en Minikube."
+  err "Alternativa: construirla dentro del cluster con"
+  err "  minikube image build -t $IMAGEN $DIR_RAIZ/app"
+  exit 1
+fi
+ok "imagen cargada"
+
+echo "  imagenes de la aplicacion registradas en el cluster:"
+minikube image ls 2>/dev/null | grep -i "sre-final-project-app" | sed 's/^/    /' \
+  || warn "la imagen no aparece en 'minikube image ls'"
+
 # ---------------------------------------------------------------------------
-# 4. Imagenes del stack de observabilidad
+# 5. Imagenes del stack de observabilidad
 # ---------------------------------------------------------------------------
-# Se descargan por adelantado y con reporte individual. Si el proxy bloquea
-# Docker Hub, conviene saberlo aqui y no como un ImagePullBackOff silencioso
-# cinco minutos despues.
-log "Descargando las imagenes del stack"
+# Se precargan en el cluster para que un bloqueo de red se vea aqui y no como
+# un ImagePullBackOff silencioso cinco minutos despues. No es fatal: si
+# 'minikube image pull' no esta disponible, Kubernetes las descargara solo
+# durante el rollout y el diagnostico posterior lo reportara.
+log "Precargando las imagenes del stack en el cluster"
 IMAGENES=(
   "prom/prometheus:v2.54.1"
   "prom/alertmanager:v0.27.0"
   "grafana/grafana:11.2.0"
   "python:3.12-slim"
 )
-FALLO_PULL=0
 for img in "${IMAGENES[@]}"; do
-  if docker image inspect "$img" >/dev/null 2>&1; then
-    ok "$img (ya presente)"
-    continue
-  fi
-  printf '  descargando %s ... ' "$img"
-  if docker pull -q "$img" >/dev/null 2>&1; then
+  printf '  %-30s ' "$img"
+  if minikube image pull "$img" >/dev/null 2>&1; then
     echo -e "${GREEN}OK${NC}"
   else
-    echo -e "${RED}FALLO${NC}"
-    FALLO_PULL=$((FALLO_PULL + 1))
+    echo -e "${YELLOW}se descargara durante el despliegue${NC}"
   fi
 done
 
-if [ "$FALLO_PULL" -gt 0 ]; then
-  err "$FALLO_PULL imagen(es) no se pudieron descargar."
-  err "Causa mas probable: el proxy de red bloquea registry-1.docker.io."
-  err "Comprobalo con:  docker pull hello-world"
-  err "Sin estas imagenes el stack no puede arrancar."
-  exit 1
-fi
-
 # ---------------------------------------------------------------------------
-# 5. Manifests
+# 6. Manifests
 # ---------------------------------------------------------------------------
 # Los ejercicios del curso usan el mismo namespace 'monitoring' con nombres
 # terminados en '-deployment'. Si quedaron de antes, compiten por los NodePorts.
@@ -146,7 +173,7 @@ fi
 ok "manifests aplicados"
 
 # ---------------------------------------------------------------------------
-# 6. Espera con diagnostico automatico
+# 7. Espera con diagnostico automatico
 # ---------------------------------------------------------------------------
 # Si un despliegue no llega a estar listo, el motivo casi siempre esta en los
 # eventos o en los logs del pod. Se imprimen aqui para no obligar a una
@@ -201,7 +228,7 @@ if [ "$ERRORES" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Accesos
+# 8. Accesos
 # ---------------------------------------------------------------------------
 IP_MINIKUBE="$(minikube ip 2>/dev/null || echo 'no disponible')"
 

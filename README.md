@@ -205,13 +205,21 @@ minikube start --driver=docker --cpus=2 --memory=4096
 minikube addons enable metrics-server
 ```
 
-**2. Construir la imagen dentro de Minikube**
+**2. Construir la imagen y cargarla en el cluster**
 
 ```bash
-# Apunta el cliente Docker al daemon interno del cluster: asi la imagen
-# queda disponible sin necesidad de un registro ni de docker push.
-eval $(minikube docker-env)
 docker build -t sre-final-project-app:latest ./app
+minikube image load sre-final-project-app:latest
+```
+
+Se construye con el Docker del host y luego se transfiere la imagen al nodo.
+El atajo `eval $(minikube docker-env)` **no** se usa a proposito: solo
+funciona cuando el runtime del cluster es Docker, y falla con containerd o
+CRI-O, que son el valor por defecto en versiones recientes de Minikube. Para
+saber que runtime usa tu cluster:
+
+```bash
+minikube profile list
 ```
 
 **3. Crear los namespaces**
@@ -563,15 +571,27 @@ Para insertarlos en este README:
 
 ## Solucion de problemas
 
-**Los pods quedan en `ImagePullBackOff`**
+**Los pods quedan en `ImagePullBackOff` o `ErrImageNeverPull`**
 
-La imagen se construyo fuera del daemon de Minikube. El `imagePullPolicy` es
-`Never`, por lo que Kubernetes espera encontrarla en el daemon local:
+La imagen no esta en el nodo. Vuelve a construirla y cargarla:
 
 ```bash
-eval $(minikube docker-env)
 docker build -t sre-final-project-app:latest ./app
+minikube image load sre-final-project-app:latest
+minikube image ls | grep sre-final-project-app   # confirmar que aparece
 kubectl rollout restart -n sre-app deployment/sre-app
+```
+
+**El build falla con `failed to inspect pulled image moby/buildkit`**
+
+Senal de que el cliente Docker esta apuntando al runtime del cluster mediante
+`minikube docker-env` y ese runtime no es Docker. Limpia esas variables y
+construye con el Docker del host:
+
+```bash
+eval $(minikube docker-env -u)
+docker build -t sre-final-project-app:latest ./app
+minikube image load sre-final-project-app:latest
 ```
 
 **Prometheus no muestra targets**

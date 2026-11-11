@@ -29,9 +29,12 @@ spec:
       containers:
         - name: sre-app
           image: sre-final-project-app:latest
-          # Never obliga a usar la imagen construida dentro del daemon Docker
-          # de Minikube; evita que Kubernetes la busque en un registro remoto.
-          imagePullPolicy: Never
+          # IfNotPresent usa la imagen que ya esta en el nodo, cargada con
+          # 'minikube image load', y solo intentaria descargarla si faltara.
+          # No se usa Never porque con el runtime containerd el nombre puede
+          # quedar normalizado como docker.io/library/... y Never fallaria con
+          # ErrImageNeverPull en lugar de resolver la imagen local.
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 5000

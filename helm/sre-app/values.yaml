@@ -9,9 +9,9 @@ replicaCount: 2
 image:
   repository: sre-final-project-app
   tag: latest
-  # Never: usa la imagen del daemon Docker de Minikube sin buscarla en un
-  # registro remoto. En un cluster real seria IfNotPresent.
-  pullPolicy: Never
+  # IfNotPresent usa la imagen ya presente en el nodo (cargada con
+  # 'minikube image load') y funciona con cualquier runtime del cluster.
+  pullPolicy: IfNotPresent
 
 nameOverride: ""
 fullnameOverride: ""
