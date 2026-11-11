@@ -119,6 +119,8 @@ El detalle del flujo de datos y las decisiones de diseno estan en
 │   ├── cluster.sh                Despliegue completo con un comando
 │   ├── setup-wsl.sh              Instalador de herramientas para WSL2 en Windows
 │   ├── verify.sh                 Verificacion de extremo a extremo del stack
+│   ├── diagnose.sh               Reporte completo de diagnostico ante fallas
+│   ├── _report.py                Formateo de las respuestas de las APIs
 │   ├── load-test.sh              Generador de trafico y de escenarios de falla
 │   └── capture.ps1               Ayudante de screenshots para Windows
 │
