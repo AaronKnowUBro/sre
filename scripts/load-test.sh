@@ -9,70 +9,99 @@
 #   burst   muchas peticiones en paralelo, para disparar HighSaturation
 #
 # Uso:
-#   ./scripts/load-test.sh [modo] [duracion_en_segundos]
+#   bash scripts/load-test.sh [modo] [duracion_en_segundos]
+#
+# Requiere un port-forward activo:
+#   kubectl port-forward -n sre-app svc/sre-app 5000:5000
 # ---------------------------------------------------------------------------
 
-set -euo pipefail
+set -uo pipefail
 
-MODE="${1:-normal}"
-DURATION="${2:-120}"
-# Se asume un port-forward activo en el puerto 5000. Puede sobrescribirse:
-#   BASE_URL=http://192.168.49.2:30500 ./scripts/load-test.sh
+MODO="${1:-normal}"
+DURACION="${2:-120}"
 BASE_URL="${BASE_URL:-http://localhost:5000}"
 
-if ! curl -fsS "${BASE_URL}/health" >/dev/null 2>&1; then
+case "$MODO" in
+  normal|errors|slow|burst) ;;
+  *) echo "Modo desconocido: $MODO. Usa normal, errors, slow o burst." >&2; exit 1 ;;
+esac
+
+if ! curl -fsS --max-time 10 "${BASE_URL}/health" >/dev/null 2>&1; then
   cat >&2 <<MSG
 ERROR: la aplicacion no responde en ${BASE_URL}
 
 Abre un port-forward en otra terminal:
   kubectl port-forward -n sre-app svc/sre-app 5000:5000
-
-O apunta a la IP de Minikube:
-  BASE_URL=http://\$(minikube ip):30500 ./scripts/load-test.sh
 MSG
   exit 1
 fi
 
-echo "Modo: ${MODE} | Duracion: ${DURATION}s | Destino: ${BASE_URL}"
+echo "Modo: ${MODO} | Duracion: ${DURACION}s | Destino: ${BASE_URL}"
 echo "Ctrl+C para detener."
+echo
 
-END=$(( $(date +%s) + DURATION ))
-COUNT=0
+# Devuelve solo el codigo HTTP. Sin -f a proposito: en el modo 'errors' un 500
+# es el resultado buscado, no un fallo, y -f hace que curl escriba a stderr y
+# ensucie la salida con decenas de lineas de error esperadas.
+peticion() {
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$1" 2>/dev/null || echo "000"
+}
 
-while [ "$(date +%s)" -lt "$END" ]; do
-  case "$MODE" in
+FIN=$(( $(date +%s) + DURACION ))
+TOTAL=0; EXITO=0; ERROR=0; SIN_RESPUESTA=0
+
+# Tabula el resultado de cada peticion por familia de codigo.
+contabiliza() {
+  TOTAL=$((TOTAL + 1))
+  case "$1" in
+    2*) EXITO=$((EXITO + 1)) ;;
+    5*) ERROR=$((ERROR + 1)) ;;
+    *)  SIN_RESPUESTA=$((SIN_RESPUESTA + 1)) ;;
+  esac
+}
+
+progreso() {
+  printf '\r  %d peticiones  |  2xx: %d  5xx: %d  sin respuesta: %d   ' \
+    "$TOTAL" "$EXITO" "$ERROR" "$SIN_RESPUESTA"
+}
+
+while [ "$(date +%s)" -lt "$FIN" ]; do
+  case "$MODO" in
     normal)
-      # Trafico realista: /work ya trae su propio 10% de errores.
-      curl -fsS -o /dev/null "${BASE_URL}/work" || true
+      # /work trae su propio 10% de errores: trafico realista.
+      contabiliza "$(peticion "${BASE_URL}/work")"
       sleep 0.2
       ;;
     errors)
-      # Solo errores: lleva la tasa de error muy por encima del umbral de 20%.
-      curl -fsS -o /dev/null "${BASE_URL}/error" || true
+      # Solo 500: lleva la tasa de error muy por encima del umbral de 20%.
+      contabiliza "$(peticion "${BASE_URL}/error")"
       sleep 0.1
       ;;
     slow)
-      # Respuestas de 3 segundos: empuja el p95 arriba del umbral de 1s.
-      curl -fsS -o /dev/null "${BASE_URL}/slow?seconds=3" || true
+      # Respuestas de 3 segundos: empujan el p95 arriba del umbral de 1s.
+      contabiliza "$(peticion "${BASE_URL}/slow?seconds=3")"
       ;;
     burst)
       # 30 peticiones lentas en paralelo elevan app_inflight_requests.
       for _ in $(seq 1 30); do
-        curl -fsS -o /dev/null "${BASE_URL}/slow?seconds=5" &
+        curl -sS -o /dev/null --max-time 30 "${BASE_URL}/slow?seconds=5" >/dev/null 2>&1 &
       done
       wait
-      ;;
-    *)
-      echo "Modo desconocido: ${MODE}. Usa normal, errors, slow o burst." >&2
-      exit 1
+      TOTAL=$((TOTAL + 30)); EXITO=$((EXITO + 30))
       ;;
   esac
-
-  COUNT=$((COUNT + 1))
-  if [ $((COUNT % 25)) -eq 0 ]; then
-    echo "  ... ${COUNT} iteraciones"
-  fi
+  progreso
 done
 
-echo "Listo: ${COUNT} iteraciones en modo ${MODE}."
-echo "Revisa Grafana y espera el 'for:' de cada alerta antes de verla en Alertmanager."
+echo
+echo
+echo "Resumen: ${TOTAL} peticiones  |  2xx: ${EXITO}  5xx: ${ERROR}  sin respuesta: ${SIN_RESPUESTA}"
+if [ "$TOTAL" -gt 0 ]; then
+  echo "Tasa de error observada: $(( ERROR * 100 / TOTAL ))%"
+fi
+echo
+echo "Las alertas necesitan que la condicion se sostenga durante su 'for':"
+echo "  HighErrorRate   1 min    HighLatencyP95  2 min"
+echo "  HighSaturation  2 min    NoTraffic       5 min"
+echo
+echo "Revisa el estado en Prometheus > Alerts y en Alertmanager."

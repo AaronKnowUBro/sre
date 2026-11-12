@@ -184,13 +184,35 @@ echo "Datasource aprovisionado:"
 curl -fsS --max-time 15 -u admin:admin http://localhost:3000/api/datasources 2>/dev/null | formatea datasources
 echo
 echo "Prueba de conexion del datasource a Prometheus:"
-if curl -fsS --max-time 20 -u admin:admin -H 'Content-Type: application/json' \
-     "http://localhost:3000/api/ds/query" \
-     -d '{"queries":[{"refId":"A","datasource":{"type":"prometheus"},"expr":"up","instant":true}],"from":"now-5m","to":"now"}' \
-     >/dev/null 2>&1; then
-  echo "  [OK]    Grafana consulta a Prometheus correctamente"; PASADAS=$((PASADAS + 1))
+# Se usa el proxy de datasources de Grafana: reenvia la consulta al Prometheus
+# configurado y prueba el camino real que usan los paneles. La API /api/ds/query
+# exige el uid del datasource, no basta con el tipo, por eso se obtiene primero.
+UID_DS=""
+if [ -n "${PY:-}" ]; then
+  UID_DS=$(curl -fsS --max-time 15 -u admin:admin http://localhost:3000/api/datasources 2>/dev/null \
+    | "$PY" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d[0]["uid"] if d else "")
+except Exception:
+    print("")' 2>/dev/null)
+fi
+
+if [ -n "$UID_DS" ]; then
+  RESP=$(curl -fsS --max-time 20 -u admin:admin \
+    "http://localhost:3000/api/datasources/proxy/uid/$UID_DS/api/v1/query?query=up" 2>/dev/null)
+  if echo "$RESP" | grep -q '"status":"success"'; then
+    SERIES=$(echo "$RESP" | grep -o '"metric"' | wc -l)
+    echo "  [OK]    Grafana consulta a Prometheus correctamente ($SERIES series)"
+    PASADAS=$((PASADAS + 1))
+  else
+    echo "  [FALLA] el datasource respondio pero sin exito:"
+    echo "          $(echo "$RESP" | head -c 200)"
+    FALLIDAS=$((FALLIDAS + 1))
+  fi
 else
-  echo "  [AVISO] la consulta de prueba no respondio como se esperaba"
+  echo "  [FALLA] no se pudo obtener el uid del datasource"
+  FALLIDAS=$((FALLIDAS + 1))
 fi
 echo
 echo "Dashboard aprovisionado:"
