@@ -123,7 +123,8 @@ El detalle del flujo de datos y las decisiones de diseno estan en
 │   ├── _report.py                Formateo de las respuestas de las APIs
 │   ├── load-test.sh              Generador de trafico y de escenarios de falla
 │   ├── capture.ps1               Ayudante de screenshots para Windows
-│   └── capture.sh                Envoltorio para invocarlo desde WSL
+│   ├── capture.sh                Envoltorio para invocarlo desde WSL
+│   └── recortar.py               Recorte de las capturas a la region util
 │
 ├── docs/
 │   ├── architecture.md           Flujo de datos y decisiones de diseno
@@ -637,6 +638,17 @@ avisa antes de hacerlo.
 
 Antes de capturar en el navegador conviene ocultar la barra de marcadores con
 `Ctrl+Shift+B` y usar una ventana limpia con solo las pestañas del proyecto.
+
+Una captura de ventana maximizada incluye la barra de tareas y bastante
+espacio vacio. `scripts/recortar.py` la recorta a la region util:
+
+```bash
+python3 scripts/recortar.py docs/images/03-prometheus-targets.png --caja 0 48 2576 400
+python3 scripts/recortar.py docs/images/01-minikube-pods.png --auto
+```
+
+Con `--auto` detecta el area con contenido comparando contra el color del
+fondo; con `--caja` se indica el rectangulo de forma explicita.
 
 ---
 
