@@ -616,19 +616,27 @@ chart de Helm.
 `scripts/capture.ps1` guarda cada captura en `docs/images/` con el nombre que
 este README espera, evitando renombrar archivos a mano. Desde WSL, donde vive
 el resto del flujo de trabajo, `scripts/capture.sh` lo invoca sin necesidad de
-cambiar de terminal:
+cambiar de terminal.
+
+El modo recomendado es `-Title`: el script localiza la ventana por su titulo,
+la trae al frente el mismo y captura solo esa ventana. Capturar "lo que este
+al frente" depende de donde quede el foco al vencer la cuenta regresiva, y es
+la forma mas facil de guardar por error una conversacion, un correo o el
+escritorio completo en un repositorio publico.
 
 ```bash
-bash scripts/capture.sh                      # ver que falta
-bash scripts/capture.sh 5 -Delay 8           # capturar la evidencia 5
-bash scripts/capture.sh 3 -Delay 8 -Window   # solo la ventana activa
+bash scripts/capture.sh -ListWindows            # ver los titulos disponibles
+bash scripts/capture.sh 3 -Title "Targets"      # capturar esa ventana
+bash scripts/capture.sh                         # ver que falta
 ```
 
-O directamente desde PowerShell:
+Si hay varias ventanas que coinciden con el texto, el script se detiene y las
+lista en lugar de elegir una: capturar la equivocada en silencio es peor que
+fallar. Y si se captura la pantalla completa con mas de un monitor conectado,
+avisa antes de hacerlo.
 
-```powershell
-.\scripts\capture.ps1 5 -Delay 8
-```
+Antes de capturar en el navegador conviene ocultar la barra de marcadores con
+`Ctrl+Shift+B` y usar una ventana limpia con solo las pestañas del proyecto.
 
 ---
 
