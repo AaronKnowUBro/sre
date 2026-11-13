@@ -122,7 +122,8 @@ El detalle del flujo de datos y las decisiones de diseno estan en
 │   ├── diagnose.sh               Reporte completo de diagnostico ante fallas
 │   ├── _report.py                Formateo de las respuestas de las APIs
 │   ├── load-test.sh              Generador de trafico y de escenarios de falla
-│   └── capture.ps1               Ayudante de screenshots para Windows
+│   ├── capture.ps1               Ayudante de screenshots para Windows
+│   └── capture.sh                Envoltorio para invocarlo desde WSL
 │
 ├── docs/
 │   ├── architecture.md           Flujo de datos y decisiones de diseno
@@ -549,6 +550,17 @@ Los screenshots van en [`docs/images/`](docs/images/). Capturas a incluir:
 
 En Windows, `scripts/capture.ps1` guarda cada captura directamente en
 `docs/images/` con el nombre correcto, sin renombrar archivos a mano:
+
+Desde WSL, donde vive el resto del flujo de trabajo, hay un envoltorio que
+evita cambiar de terminal:
+
+```bash
+bash scripts/capture.sh                      # ver que falta
+bash scripts/capture.sh 5 -Delay 8           # capturar la evidencia 5
+bash scripts/capture.sh 3 -Delay 8 -Window   # solo la ventana activa
+```
+
+Y directamente desde PowerShell:
 
 ```powershell
 # Ver que capturas faltan
