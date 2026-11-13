@@ -136,7 +136,7 @@ data:
           "description": "Targets de la aplicacion que responden al scrape.",
           "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
           "targets": [
-            { "refId": "A", "expr": "count(up{job=\"kubernetes-pods\", app=\"sre-app\"} == 1)" }
+            { "refId": "A", "expr": "count(up{job=\"annotated-pods\", app=\"sre-app\"} == 1)" }
           ],
           "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 } }
         },
@@ -224,8 +224,8 @@ data:
           "targets": [
             {
               "refId": "A",
-              "expr": "sum(app_inflight_requests) by (kubernetes_pod_name)",
-              "legendFormat": "{{kubernetes_pod_name}}"
+              "expr": "sum(app_inflight_requests) by (pod)",
+              "legendFormat": "{{pod}}"
             }
           ],
           "fieldConfig": {

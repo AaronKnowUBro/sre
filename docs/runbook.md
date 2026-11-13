@@ -118,7 +118,7 @@ errores por timeout.
 **Como diagnosticar.**
 
 ```bash
-sum(app_inflight_requests) by (kubernetes_pod_name)
+sum(app_inflight_requests) by (pod)
 kubectl top pods -n sre-app
 ```
 
@@ -199,7 +199,7 @@ aparece en el service discovery.
 
 ```bash
 # 1. Revisar los targets en Prometheus
-#    http://localhost:9090/targets  -> buscar el job kubernetes-pods
+#    http://localhost:9090/targets  -> buscar el job annotated-pods
 
 # 2. Verificar que las anotaciones del pod sigan en su lugar
 kubectl get pods -n sre-app -o jsonpath='{.items[*].metadata.annotations}'

@@ -13,16 +13,19 @@ data:
   prometheus.yml: |
     global:
       # Cada 15s se recolectan las metricas. Un intervalo mas corto da mas
-      # resolucion pero consume mas almacenamiento y CPU.
+      # resolucion a costa de almacenamiento y CPU.
       scrape_interval: 15s
       # Cada 15s se reevaluan las reglas de alerta.
       evaluation_interval: 15s
+      # Si un scrape no responde en 10s se marca el target como caido, antes
+      # de que el siguiente ciclo se acumule encima.
+      scrape_timeout: 10s
       external_labels:
         cluster: minikube
         project: sre-final-project
 
     # Prometheus evalua las reglas y envia las alertas que disparan hacia
-    # Alertmanager, que es quien decide a donde notificarlas.
+    # Alertmanager, que decide a donde notificarlas.
     alerting:
       alertmanagers:
         - static_configs:
@@ -33,62 +36,134 @@ data:
       - /etc/prometheus/rules/*.yml
 
     scrape_configs:
-      # 1) Prometheus se monitorea a si mismo: primera senal de que el stack vive.
-      - job_name: prometheus
+      # ---------------------------------------------------------------
+      # 1) Prometheus se recolecta a si mismo. Es la primera senal de que
+      #    el stack de observabilidad esta vivo: si este target cae, nada
+      #    de lo demas es confiable.
+      # ---------------------------------------------------------------
+      - job_name: prometheus-self
         static_configs:
-          - targets: ['localhost:9090']
+          - targets: ['127.0.0.1:9090']
 
-      # 2) Descubrimiento dinamico de pods por anotaciones.
-      #    Es el job que recolecta nuestra aplicacion: no hay IPs fijas, los
-      #    pods se descubren solos aunque cambien de IP al reiniciarse.
-      - job_name: kubernetes-pods
+      # ---------------------------------------------------------------
+      # 2) Pods marcados con anotaciones.
+      #
+      #    El descubrimiento se limita a los dos namespaces del proyecto en
+      #    lugar de recorrer el cluster completo: Prometheus mantiene en
+      #    memoria el estado de cada objeto que observa, y vigilar
+      #    kube-system y el resto no aporta nada aqui.
+      #
+      #    La direccion se arma concatenando IP y puerto con 'separator',
+      #    sin necesidad de una expresion regular con grupos de captura.
+      # ---------------------------------------------------------------
+      - job_name: annotated-pods
         kubernetes_sd_configs:
           - role: pod
+            namespaces:
+              names:
+                - sre-app
+                - monitoring
+
         relabel_configs:
-          # Solo los pods con prometheus.io/scrape=true entran.
+          # Solo entran los pods que declaran querer ser recolectados.
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "true"
             action: keep
-            regex: true
-          # Se arma la direccion con la IP del pod y el puerto de la anotacion.
-          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
-            action: replace
-            regex: ([^:]+);(.+)
-            replacement: ${1}:${2}
+
+          # Un pod en Pending o Terminating no puede responder: descartarlo
+          # aqui evita targets en rojo durante cada rollout.
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+
+          # El puerto es obligatorio. Sin esta comprobacion, un pod sin la
+          # anotacion produciria una direccion terminada en ':' y el target
+          # quedaria permanentemente caido sin explicacion evidente.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+            regex: "[0-9]+"
+            action: keep
+
+          # IP y puerto se unen con ':' usando el separador, en lugar de
+          # reconstruir la cadena con una regex y grupos de captura.
+          - source_labels:
+              - __meta_kubernetes_pod_ip
+              - __meta_kubernetes_pod_annotation_prometheus_io_port
+            separator: ":"
             target_label: __address__
-          # Ruta personalizada si el pod declara prometheus.io/path.
-          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
             action: replace
-            target_label: __metrics_path__
+
+          # Ruta personalizada si el pod la declara; si no, queda /metrics.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
             regex: (.+)
-          # Etiquetas utiles para filtrar en Grafana y en las alertas.
+            target_label: __metrics_path__
+            action: replace
+
+          # Se usan los nombres de etiqueta convencionales del ecosistema
+          # (namespace, pod, container, node) y no variantes propias: asi las
+          # consultas y los dashboards de la comunidad funcionan sin traducir
+          # nombres, y las metricas de la aplicacion se pueden unir con las
+          # de cAdvisor, que ya trae esas mismas etiquetas.
           - source_labels: [__meta_kubernetes_namespace]
-            target_label: kubernetes_namespace
+            target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
-            target_label: kubernetes_pod_name
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
           - source_labels: [__meta_kubernetes_pod_label_app]
             target_label: app
 
-      # 3) Metricas de contenedores desde cAdvisor (CPU, memoria, red).
-      #    Alimentan los paneles de saturacion del dashboard.
-      - job_name: kubernetes-cadvisor
+        metric_relabel_configs:
+          # Las metricas internas del recolector de basura y del planificador
+          # de Go no participan en ningun SLO de este proyecto y multiplican
+          # el numero de series por cada pod. Se descartan en la ingesta.
+          - source_labels: [__name__]
+            regex: "go_(gc|memstats|sched)_.*"
+            action: drop
+
+      # ---------------------------------------------------------------
+      # 3) Metricas de contenedores desde cAdvisor.
+      #
+      #    Se consulta a traves del subrecurso proxy del API server
+      #    (/api/v1/nodes/<nodo>/proxy/metrics/cadvisor) en lugar de abrir
+      #    una conexion al puerto 10250 del kubelet. Dos ventajas: no hace
+      #    falta que la red del pod alcance al nodo, y la autenticacion y el
+      #    certificado son los del API server, que el ServiceAccount ya
+      #    tiene montados, sin necesidad de omitir la verificacion TLS.
+      # ---------------------------------------------------------------
+      - job_name: kubelet-cadvisor
         scheme: https
         tls_config:
-          insecure_skip_verify: true
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
         bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
         kubernetes_sd_configs:
           - role: node
+
         relabel_configs:
-          - source_labels: [__address__]
-            action: replace
-            regex: (.+):(?:\d+)
-            replacement: ${1}:10250
-            target_label: __address__
-          - target_label: __metrics_path__
-            replacement: /metrics/cadvisor
-          - action: labelmap
-            regex: __meta_kubernetes_node_label_(.+)
+          # Todas las consultas van al API server, no al nodo.
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          # La ruta identifica de que nodo se piden las metricas.
           - source_labels: [__meta_kubernetes_node_name]
-            target_label: kubernetes_node
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+
+        metric_relabel_configs:
+          # cAdvisor expone cientos de series por cada contenedor del nodo,
+          # incluidos los del plano de control. Se conservan solo los dos
+          # namespaces del proyecto.
+          - source_labels: [namespace]
+            regex: "sre-app|monitoring"
+            action: keep
+          # Las series sin nombre de contenedor son agregados del pod
+          # completo y duplican la informacion de las series por contenedor.
+          - source_labels: [container]
+            regex: ""
+            action: drop
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -107,7 +182,7 @@ data:
         rules:
           # ERRORES: porcentaje de respuestas 5xx sobre el total.
           # rate() sobre 2 minutos reacciona rapido sin ser ruidoso.
-          # El 'for: 1m' evita alertar por un pico aislado de un solo scrape.
+          # El 'for: 1m' evita alertar por un pico de un solo scrape.
           - alert: HighErrorRate
             expr: |
               100 * (
@@ -126,7 +201,7 @@ data:
 
           # LATENCIA: percentil 95 calculado desde los buckets del histograma.
           # Se usa p95 y no el promedio porque el promedio esconde la cola
-          # lenta, que es justo la que afecta la experiencia del usuario.
+          # lenta, que es la que afecta la experiencia del usuario.
           - alert: HighLatencyP95
             expr: |
               histogram_quantile(
@@ -155,7 +230,8 @@ data:
               runbook: "docs/runbook.md#highSaturation"
 
           # TRAFICO: ausencia total de peticiones. Un dashboard en cero puede
-          # significar que nadie usa el servicio o que esta roto aguas arriba.
+          # significar que nadie usa el servicio o que algo aguas arriba se
+          # rompio.
           - alert: NoTraffic
             expr: sum(rate(http_requests_total[5m])) == 0
             for: 5m
@@ -174,18 +250,19 @@ data:
         rules:
           # 'up' lo genera Prometheus por cada target: 1 si responde, 0 si no.
           - alert: AppInstanceDown
-            expr: up{job="kubernetes-pods", app="sre-app"} == 0
+            expr: up{job="annotated-pods", app="sre-app"} == 0
             for: 1m
             labels:
               severity: critical
               service: sre-app
             annotations:
               summary: "Instancia de sre-app sin responder"
-              description: "El pod {{ $labels.kubernetes_pod_name }} no responde al scrape de Prometheus."
+              description: "El pod {{ $labels.pod }} del namespace {{ $labels.namespace }} no responde al scrape de Prometheus."
               runbook: "docs/runbook.md#appInstanceDown"
 
           # absent() dispara cuando la metrica desaparece por completo, caso
-          # que 'up == 0' no cubre si el target deja de existir en el discovery.
+          # que 'up == 0' no cubre si el target deja de existir en el
+          # descubrimiento.
           - alert: AppMetricsMissing
             expr: absent(app_up)
             for: 2m
@@ -214,7 +291,7 @@ spec:
       labels:
         app: prometheus
     spec:
-      # Vincula el ServiceAccount con los permisos RBAC del archivo anterior.
+      # Vincula el ServiceAccount con los permisos del archivo anterior.
       serviceAccountName: prometheus
       containers:
         - name: prometheus
@@ -222,9 +299,10 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            # Retencion corta: suficiente para la demo y evita llenar el disco.
+            # Retencion corta: suficiente para la demostracion y evita que
+            # el disco del nodo se llene.
             - --storage.tsdb.retention.time=6h
-            # Permite recargar la configuracion con POST /-/reload sin reiniciar.
+            # Permite recargar la configuracion con POST /-/reload.
             - --web.enable-lifecycle
           ports:
             - name: http
@@ -255,8 +333,8 @@ spec:
         - name: rules
           configMap:
             name: prometheus-rules
-        # emptyDir: los datos se pierden al reiniciar el pod. Es aceptable en
-        # un entorno de practica; en produccion seria un PersistentVolumeClaim.
+        # emptyDir: los datos se pierden al reiniciar el pod. Aceptable en un
+        # entorno de practica; en produccion seria un PersistentVolumeClaim.
         - name: storage
           emptyDir: {}
 ---

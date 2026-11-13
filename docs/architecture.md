@@ -77,6 +77,57 @@ de IP cada vez que se reinician. Una lista fija de IPs en `prometheus.yml` se
 rompe en el primer rollout. Con anotaciones, cualquier equipo puede sumar su
 servicio al monitoreo sin tocar la configuracion de Prometheus.
 
+**Descubrimiento limitado a los namespaces del proyecto.** El bloque
+`kubernetes_sd_configs` declara `namespaces: names: [sre-app, monitoring]` en
+lugar de recorrer el cluster completo. Prometheus mantiene en memoria el estado
+de cada objeto que observa a traves de la API, y vigilar `kube-system` y el
+resto de los namespaces no aporta ningun target util aqui.
+
+**La direccion se arma con `separator`, no con una expresion regular.** Para
+unir la IP del pod con el puerto de la anotacion basta concatenar las dos
+etiquetas de origen con `separator: ":"` y escribir el resultado en
+`__address__`. La alternativa habitual (una regex con dos grupos de captura y
+`replacement: ${1}:${2}`) produce el mismo valor con mas piezas que pueden
+fallar en silencio. Antes de eso, un `keep` exige que la anotacion del puerto
+exista: sin esa comprobacion, un pod que la omita generaria una direccion
+terminada en `:` y el target quedaria caido sin motivo evidente.
+
+**Se descartan los pods que no estan en `Running`.** Un pod en `Pending` o
+`Terminating` no puede responder a un scrape. Filtrarlo en el descubrimiento
+evita que cada rollout llene la pagina de targets de entradas en rojo que no
+indican ningun problema real.
+
+**Nombres de etiqueta convencionales.** Las etiquetas finales son `namespace`,
+`pod`, `container` y `node`, los mismos nombres que usan cAdvisor y el
+ecosistema de kube-prometheus, en lugar de variantes propias como
+`kubernetes_pod_name`. Asi las metricas de la aplicacion se pueden unir con las
+del contenedor en una misma consulta, y cualquier dashboard de la comunidad
+funciona sin traducir nombres.
+
+**cAdvisor se consulta por el proxy del API server.** En lugar de abrir una
+conexion al puerto 10250 del kubelet, el job reescribe `__address__` a
+`kubernetes.default.svc:443` y la ruta a
+`/api/v1/nodes/<nodo>/proxy/metrics/cadvisor`. Dos ventajas: la red del pod no
+necesita alcanzar al nodo, y la autenticacion y el certificado son los del API
+server, que el ServiceAccount ya tiene montados. Esto permite verificar TLS con
+el CA del cluster en vez de recurrir a `insecure_skip_verify`.
+
+**La cardinalidad se controla en la ingesta.** Los bloques
+`metric_relabel_configs` descartan las metricas internas del recolector de
+basura y del planificador de Go, que no participan en ningun SLO y se
+multiplican por cada pod, y conservan de cAdvisor solo los dos namespaces del
+proyecto. cAdvisor expone cientos de series por cada contenedor del nodo,
+incluidos los del plano de control.
+
+**El RBAC se deriva de la configuracion de scrape, no de una lista generica.**
+Los permisos son exactamente los que los tres jobs necesitan: `pods`,
+`services` y `endpoints` para el descubrimiento, `nodes` para enumerar y
+`nodes/proxy` para llegar a cAdvisor. No se conceden `ingresses` (no hay
+ninguno), `configmaps` (Prometheus lee los suyos por volumen) ni
+`nonResourceURLs` (no se recolecta el `/metrics` del API server). Un permiso
+que ningun scrape usa solo amplia el radio de impacto si el ServiceAccount se
+filtra.
+
 **Histograma y no resumen para la latencia.** Un `Histogram` permite calcular
 percentiles agregados entre varias replicas con `histogram_quantile()`. Un
 `Summary` calcula los percentiles en cada pod por separado y esos valores no

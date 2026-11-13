@@ -1,46 +1,71 @@
 # ---------------------------------------------------------------------------
 # RBAC para Prometheus (Requisito 3)
 # ---------------------------------------------------------------------------
-# Prometheus consulta la API de Kubernetes para descubrir pods, servicios y
-# nodos de forma dinamica. Sin estos permisos el service discovery falla con
-# errores 403 y los targets nunca aparecen.
-# Los permisos son de solo lectura, siguiendo el principio de menor privilegio.
+# Prometheus consulta la API de Kubernetes para descubrir sus objetivos de
+# forma dinamica. Sin estos permisos el service discovery falla con 403 y los
+# targets nunca aparecen.
+#
+# Los permisos se derivan de lo que la configuracion de scrape realmente usa,
+# no de una lista generica:
+#
+#   - pods            el job annotated-pods descubre con role: pod
+#   - services        el Service de la aplicacion lleva anotaciones
+#   - endpoints       necesario para resolver los Service a pods concretos
+#   - nodes           el job kubelet-cadvisor descubre con role: node
+#   - nodes/proxy     cAdvisor se consulta por el proxy del API server
+#
+# Deliberadamente NO se conceden ingresses (no hay ninguno en el proyecto),
+# configmaps (Prometheus lee los suyos por volumen, no por la API) ni
+# nonResourceURLs (no se recolecta el /metrics del API server). Conceder
+# permisos que ningun scrape_config usa contradice el principio de menor
+# privilegio y amplia el radio de impacto si el ServiceAccount se filtra.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: prometheus
   namespace: monitoring
+  labels:
+    app: prometheus
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: prometheus
+  name: prometheus-discovery
+  labels:
+    app: prometheus
 rules:
+  # Descubrimiento de objetivos. Solo lectura: Prometheus nunca modifica nada.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - endpoints
+    verbs: ["get", "list", "watch"]
+
+  # Enumerar los nodos para el job de cAdvisor.
   - apiGroups: [""]
     resources:
       - nodes
+    verbs: ["list", "watch"]
+
+  # El subrecurso proxy permite llegar al kubelet de cada nodo a traves del
+  # API server, en lugar de abrir una conexion directa a su puerto 10250.
+  - apiGroups: [""]
+    resources:
       - nodes/proxy
-      - nodes/metrics
-      - services
-      - endpoints
-      - pods
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["extensions", "networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch"]
-  # Permite consultar /metrics de los componentes del plano de control.
-  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: prometheus
+  name: prometheus-discovery
+  labels:
+    app: prometheus
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: prometheus
+  name: prometheus-discovery
 subjects:
   - kind: ServiceAccount
     name: prometheus

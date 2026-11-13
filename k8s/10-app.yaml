@@ -20,7 +20,7 @@ spec:
       labels:
         app: sre-app
       # Estas anotaciones son la clave del service discovery de Prometheus:
-      # el job 'kubernetes-pods' las lee y solo recolecta los pods marcados.
+      # el job 'annotated-pods' las lee y solo recolecta los pods marcados.
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "5000"

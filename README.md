@@ -288,7 +288,7 @@ Credenciales de Grafana: **admin / admin**.
 El dashboard se aprovisiona solo en **Dashboards → SRE → SRE - Golden Signals**.
 
 Para confirmar que Prometheus esta recolectando la aplicacion, abre
-**Status → Targets** y busca el job `kubernetes-pods`: deben aparecer los dos
+**Status → Targets** y busca el job `annotated-pods`: deben aparecer los dos
 pods en estado `UP`.
 
 ### Verificacion automatica

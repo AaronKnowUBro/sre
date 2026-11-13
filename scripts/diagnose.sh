@@ -110,8 +110,8 @@ done
 
 sub "RBAC de Prometheus"
 kubectl get sa prometheus -n monitoring 2>&1
-kubectl get clusterrole prometheus 2>&1
-kubectl get clusterrolebinding prometheus 2>&1
+kubectl get clusterrole prometheus-discovery 2>&1
+kubectl get clusterrolebinding prometheus-discovery 2>&1
 echo "puede el ServiceAccount listar pods?"
 kubectl auth can-i list pods --as=system:serviceaccount:monitoring:prometheus -A 2>&1
 
