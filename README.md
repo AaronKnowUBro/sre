@@ -682,6 +682,19 @@ kubectl logs -n monitoring deploy/prometheus | grep -i alertmanager
 Recuerda que cada alerta tiene su `for:`: debe pasar ese tiempo con la
 condicion activa antes de que la notificacion salga.
 
+**Las secciones de API de `verify.sh` fallan pero los pods estan `Running`**
+
+Un `port-forward` se enlaza a un pod concreto, no al Service. Si ese pod se
+reemplaza (tras un rollout, o al reiniciar Minikube), el tunel queda roto
+mientras su proceso sigue ocupando el puerto, y uno nuevo no puede enlazarse.
+La senal delatora es que Grafana consulta a Prometheus sin problema, porque
+usa el DNS interno del cluster y no el tunel.
+
+```bash
+pkill -f "kubectl port-forward"
+bash scripts/verify.sh
+```
+
 **`kubectl top` no responde**
 
 ```bash

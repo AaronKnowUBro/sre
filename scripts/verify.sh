@@ -130,12 +130,55 @@ fi
 
 # ---------------------------------------------------------------------------
 titulo "3. PORT-FORWARD TEMPORALES"
+# Un port-forward se enlaza a un pod concreto, no al Service. Si ese pod se
+# reemplaza (un rollout, por ejemplo), el tunel queda roto pero su proceso
+# sigue ocupando el puerto, y uno nuevo no puede enlazarse. Es la causa mas
+# frecuente de que las secciones de API fallen mientras el cluster esta sano,
+# asi que se comprueba cada tunel y se nombra la causa en lugar de dejar que
+# las comprobaciones posteriores fallen sin explicacion.
 kubectl port-forward -n sre-app    svc/sre-app      5000:5000  >/dev/null 2>&1 & PIDS+=($!)
 kubectl port-forward -n monitoring svc/prometheus   9090:9090  >/dev/null 2>&1 & PIDS+=($!)
 kubectl port-forward -n monitoring svc/alertmanager 9093:9093  >/dev/null 2>&1 & PIDS+=($!)
 kubectl port-forward -n monitoring svc/grafana      3000:3000  >/dev/null 2>&1 & PIDS+=($!)
 echo "  esperando a que los tuneles respondan..."
 sleep 8
+
+TUNELES_ROTOS=0
+comprueba_tunel() {
+  local puerto="$1" ruta="$2" nombre="$3"
+  if curl -fsS --max-time 8 "http://localhost:${puerto}${ruta}" >/dev/null 2>&1; then
+    printf '  [OK]    %-13s responde en el puerto %s\n' "$nombre" "$puerto"
+  else
+    printf '  [FALLA] %-13s NO responde en el puerto %s\n' "$nombre" "$puerto"
+    TUNELES_ROTOS=$((TUNELES_ROTOS + 1))
+  fi
+}
+comprueba_tunel 5000 /health     "aplicacion"
+comprueba_tunel 9090 /-/ready    "Prometheus"
+comprueba_tunel 9093 /-/ready    "Alertmanager"
+comprueba_tunel 3000 /api/health "Grafana"
+
+if [ "$TUNELES_ROTOS" -gt 0 ]; then
+  cat <<'AVISO'
+
+  --------------------------------------------------------------------
+  Hay tuneles que no responden. Causa mas probable: un port-forward de
+  una sesion anterior sigue ocupando el puerto pero apunta a un pod que
+  ya fue reemplazado, por ejemplo tras un rollout. Su proceso impide
+  que este script abra el suyo.
+
+  Si el pod correspondiente aparece como Running mas arriba, el cluster
+  esta bien y solo hay que renovar los tuneles:
+
+      pkill -f "kubectl port-forward"
+      bash scripts/verify.sh
+
+  Las comprobaciones de API que siguen fallaran mientras el tunel este
+  roto, sin que eso indique nada sobre el estado del servicio.
+  --------------------------------------------------------------------
+
+AVISO
+fi
 
 # ---------------------------------------------------------------------------
 titulo "4. APLICACION"
