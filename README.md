@@ -534,25 +534,89 @@ El de Prometheus extrae las reglas del ConfigMap a un archivo temporal, porque
 
 ## Evidencia de la implementacion
 
-Los screenshots van en [`docs/images/`](docs/images/). Capturas a incluir:
+Capturas tomadas sobre el stack desplegado y funcionando en Minikube, en el
+orden en que se recorre el flujo de observabilidad: del despliegue a la
+recoleccion, de ahi a la visualizacion y finalmente a la alerta entregada.
 
-| Archivo | Que debe mostrar |
-| ------- | ---------------- |
-| `01-minikube-pods.png` | `kubectl get pods -A` con todos los pods en `Running` |
-| `02-app-metrics.png` | El endpoint `/metrics` en el navegador |
-| `03-prometheus-targets.png` | Status → Targets con los pods en `UP` |
-| `04-prometheus-query.png` | Una consulta PromQL con datos |
-| `05-grafana-dashboard.png` | El dashboard de Golden Signals con trafico |
-| `06-prometheus-alert-firing.png` | Una alerta en estado `firing` |
-| `07-alertmanager-alerts.png` | La alerta agrupada en Alertmanager |
-| `08-alert-notification.png` | La notificacion recibida en el receptor |
-| `09-github-actions.png` | El pipeline de CI en verde |
+### 1. Despliegue en Kubernetes
 
-En Windows, `scripts/capture.ps1` guarda cada captura directamente en
-`docs/images/` con el nombre correcto, sin renombrar archivos a mano:
+Los seis pods en estado `Running`: dos replicas de la aplicacion en el
+namespace `sre-app`, y Prometheus, Alertmanager, Grafana y el receptor de
+alertas en `monitoring`.
 
-Desde WSL, donde vive el resto del flujo de trabajo, hay un envoltorio que
-evita cambiar de terminal:
+![Pods en Running](docs/images/01-minikube-pods.png)
+
+### 2. La aplicacion expone sus metricas
+
+El endpoint `/metrics` en formato de texto de Prometheus, con los contadores,
+el histograma de latencia y los gauges de saturacion y disponibilidad.
+
+![Metricas de la aplicacion](docs/images/02-app-metrics.png)
+
+### 3. Prometheus descubre y recolecta los pods
+
+Los targets en estado `UP`. Las dos replicas de la aplicacion fueron
+descubiertas por sus anotaciones `prometheus.io/scrape`, sin ninguna IP fija
+en la configuracion.
+
+![Targets de Prometheus](docs/images/03-prometheus-targets.png)
+
+### 4. Consulta PromQL con datos reales
+
+La tasa de peticiones desglosada por endpoint y codigo de estado, calculada
+sobre las series recolectadas.
+
+![Consulta en Prometheus](docs/images/04-prometheus-query.png)
+
+### 5. Dashboard de Golden Signals en Grafana
+
+Los nueve paneles con trafico en curso: disponibilidad, trafico, latencia por
+percentiles, tasa de error, saturacion y consumo de CPU. El dashboard y su
+datasource se aprovisionan por codigo desde ConfigMaps, sin pasos manuales en
+la interfaz.
+
+![Dashboard de Grafana](docs/images/05-grafana-dashboard.png)
+
+### 6. Alerta en estado firing
+
+`HighErrorRate` disparada tras sostener la condicion durante su ventana
+`for: 1m`. El trafico de errores se genero con `scripts/load-test.sh errors`.
+
+![Alerta disparada en Prometheus](docs/images/06-prometheus-alert-firing.png)
+
+### 7. La alerta llega agrupada a Alertmanager
+
+Prometheus evalua y dispara; Alertmanager agrupa por `alertname` y `service`,
+aplica el enrutado por severidad y decide a donde notificar.
+
+![Alerta en Alertmanager](docs/images/07-alertmanager-alerts.png)
+
+### 8. Notificacion entregada al receptor
+
+El ultimo eslabon de la cadena: la notificacion recibida con sus labels y
+annotations, incluida la tasa de error observada en el momento del disparo.
+Esto cierra el camino completo aplicacion -> Prometheus -> Alertmanager ->
+destino.
+
+![Notificacion recibida](docs/images/08-alert-notification.png)
+
+### 9. Pipeline de CI en verde
+
+Los cinco trabajos del pipeline: lint y pruebas de la aplicacion,
+construccion de la imagen, validacion de los manifests contra los esquemas de
+Kubernetes, validacion de las reglas de alerta con `promtool` y validacion del
+chart de Helm.
+
+![Pipeline de GitHub Actions](docs/images/09-github-actions.png)
+
+---
+
+### Como se tomaron
+
+`scripts/capture.ps1` guarda cada captura en `docs/images/` con el nombre que
+este README espera, evitando renombrar archivos a mano. Desde WSL, donde vive
+el resto del flujo de trabajo, `scripts/capture.sh` lo invoca sin necesidad de
+cambiar de terminal:
 
 ```bash
 bash scripts/capture.sh                      # ver que falta
@@ -560,23 +624,10 @@ bash scripts/capture.sh 5 -Delay 8           # capturar la evidencia 5
 bash scripts/capture.sh 3 -Delay 8 -Window   # solo la ventana activa
 ```
 
-Y directamente desde PowerShell:
+O directamente desde PowerShell:
 
 ```powershell
-# Ver que capturas faltan
-.\scripts\capture.ps1
-
-# Capturar la numero 5 esperando 8 segundos para acomodar la ventana
 .\scripts\capture.ps1 5 -Delay 8
-
-# Capturar solo la ventana activa, sin el escritorio de fondo
-.\scripts\capture.ps1 3 -Window
-```
-
-Para insertarlos en este README:
-
-```markdown
-![Dashboard de Grafana](docs/images/05-grafana-dashboard.png)
 ```
 
 ---
